@@ -33,6 +33,9 @@ class Main(star.Star):
         self.monitor_paths = self.config.get("monitor_paths", [])
         self.monitor_file_types = self.config.get("monitor_file_types", [])
         self.enable_auto_forward = self.config.get("enable_auto_forward", False)
+        self.auto_forward_target_type = self.config.get("auto_forward_target_type", "group")
+        self.auto_forward_group_ids = self.config.get("auto_forward_group_ids", [])
+        self.auto_forward_user_ids = self.config.get("auto_forward_user_ids", [])
         self.auto_forward_delay = self.config.get("auto_forward_delay_seconds", 10)
         self.keep_backup_history_days = self.config.get("keep_backup_history", 7)
 
@@ -42,6 +45,7 @@ class Main(star.Star):
         self._file_hashes: Dict[str, str] = {}
         self._last_backup_time = time.time()
         self._timed_task_running = False
+        self._pending_forwards: List[Dict[str, Any]] = []
 
     def _check_user_permission(self, event: AstrMessageEvent) -> Optional[str]:
         """检查用户是否有权限使用插件"""
@@ -196,6 +200,18 @@ class Main(star.Star):
         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         return files
 
+    def _get_file_type(self, file_path: Path) -> str:
+        """获取文件类型"""
+        suffix = file_path.suffix.lower()
+        if suffix in ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']:
+            return 'image'
+        elif suffix in ['.mp4', '.avi', '.mov', '.mkv']:
+            return 'video'
+        elif suffix in ['.mp3', '.wav', '.ogg', '.aac', '.flac']:
+            return 'audio'
+        else:
+            return 'file'
+
     async def initialize(self):
         """初始化插件"""
         self._ensure_backup_dir()
@@ -210,27 +226,62 @@ class Main(star.Star):
             asyncio.create_task(self._timed_backup_task())
             logger.info(f"[backup_storage] 定时备份已启用，间隔 {self.timed_backup_interval} 分钟")
 
+        if self.enable_auto_forward:
+            logger.info(f"[backup_storage] 🚀 自动转发已启用")
+            logger.info(f"[backup_storage]    备份延迟: {self.auto_forward_delay} 秒")
+            logger.info(f"[backup_storage]    备份完成后文件将加入待转发队列")
+
     async def _timed_backup_task(self):
         """定时备份任务"""
         check_interval = 60
         while self._timed_task_running:
             try:
                 current_time = time.time()
-                if current_time - self._last_backup_time >= self.timed_backup_interval * 60:
-                    logger.info("[backup_storage] 执行定时备份...")
+                next_backup_time = self._last_backup_time + (self.timed_backup_interval * 60)
+                time_until_next = next_backup_time - current_time
+                
+                if time_until_next <= 0:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(f"[backup_storage] ═══════════════════════════════════════════")
+                    logger.info(f"[backup_storage] ⏰ [{timestamp}] 定时备份开始执行...")
+                    logger.info(f"[backup_storage] 📁 监控路径数量: {len(self.monitor_paths)}")
+                    
                     backup_results = await self._scan_and_backup_monitor_paths()
+                    
                     if backup_results:
-                        logger.info(f"[backup_storage] 定时备份完成，备份了 {len(backup_results)} 个文件")
+                        logger.info(f"[backup_storage] ✅ 备份完成！共备份 {len(backup_results)} 个文件:")
+                        for i, file_info in enumerate(backup_results, 1):
+                            logger.info(f"[backup_storage]    {i}. {file_info['file_name']}")
+                        
                         self._last_backup_time = current_time
-
+                        
                         if self.enable_auto_forward:
+                            logger.info(f"[backup_storage] 📋 正在将 {len(backup_results)} 个文件加入待转发队列...")
                             await asyncio.sleep(self.auto_forward_delay)
                             for file_info in backup_results:
-                                await self._auto_forward_file(file_info)
+                                self._queue_auto_forward(file_info)
+                            logger.info(f"[backup_storage] ✅ 所有文件已加入待转发队列")
+                        
+                        next_time = datetime.fromtimestamp(self._last_backup_time + self.timed_backup_interval * 60)
+                        logger.info(f"[backup_storage] 📅 下次备份时间: {next_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    else:
+                        logger.info(f"[backup_storage] ℹ️  本次扫描未发现新文件，跳过备份")
+                        self._last_backup_time = current_time
+                    logger.info(f"[backup_storage] ═══════════════════════════════════════════")
                 await asyncio.sleep(check_interval)
             except Exception as e:
                 logger.error(f"[backup_storage] 定时备份任务异常: {e}")
                 await asyncio.sleep(check_interval)
+
+    def _queue_auto_forward(self, file_info: Dict[str, Any]):
+        """将文件加入待转发队列"""
+        self._pending_forwards.append({
+            'file_path': file_info['file_path'],
+            'file_name': file_info['file_name'],
+            'file_type': self._get_file_type(Path(file_info['file_path'])),
+            'timestamp': time.time()
+        })
+        logger.info(f"[backup_storage] 已加入待转发队列: {file_info['file_name']}")
 
     async def _scan_and_backup_monitor_paths(self) -> List[Dict[str, Any]]:
         """扫描监控路径并备份新文件"""
@@ -317,26 +368,39 @@ class Main(star.Star):
             logger.error(f"[backup_storage] 自动备份文件失败: {e}")
             return None
 
-    async def _auto_forward_file(self, file_info: Dict[str, Any]):
-        """自动转发文件"""
-        try:
-            file_path = Path(file_info['file_path'])
-            if not file_path.exists():
-                return
+    async def check_pending_forwards(self, event: AstrMessageEvent):
+        """检查待转发的文件队列并在当前群聊/用户发送"""
+        if not self._pending_forwards:
+            return
 
-            suffix = file_path.suffix.lower()
+        pending = self._pending_forwards.copy()
+        self._pending_forwards.clear()
 
-            if suffix in ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp']:
-                logger.info(f"[backup_storage] 自动转发图片: {file_info['file_name']}")
-            elif suffix in ['.mp4', '.avi', '.mov', '.mkv']:
-                logger.info(f"[backup_storage] 自动转发视频: {file_info['file_name']}")
-            elif suffix in ['.mp3', '.wav', '.ogg', '.aac', '.flac']:
-                logger.info(f"[backup_storage] 自动转发音频: {file_info['file_name']}")
-            else:
-                logger.info(f"[backup_storage] 自动转发文件: {file_info['file_name']}")
+        for forward_info in pending:
+            try:
+                file_path = Path(forward_info['file_path'])
+                if not file_path.exists():
+                    logger.warning(f"[backup_storage] 待转发文件不存在: {forward_info['file_name']}")
+                    continue
 
-        except Exception as e:
-            logger.error(f"[backup_storage] 自动转发失败: {e}")
+                file_type = forward_info['file_type']
+                logger.info(f"[backup_storage] 自动转发 {file_type}: {forward_info['file_name']}")
+
+                if file_type == 'image':
+                    yield event.image_result(str(file_path))
+                    yield event.plain_result(f"🚀 自动转发 {forward_info['file_name']}")
+                elif file_type == 'video':
+                    yield event.chain_result([Comp.Video.fromFileSystem(str(file_path))])
+                    yield event.plain_result(f"🚀 自动转发 {forward_info['file_name']}")
+                elif file_type == 'audio':
+                    yield event.chain_result([Comp.Record(file=str(file_path), url=str(file_path))])
+                    yield event.plain_result(f"🚀 自动转发 {forward_info['file_name']}")
+                else:
+                    yield event.chain_result([Comp.File.fromFileSystem(str(file_path))])
+                    yield event.plain_result(f"🚀 自动转发 {forward_info['file_name']}")
+
+            except Exception as e:
+                logger.error(f"[backup_storage] 自动转发失败: {e}")
 
     async def backup_file(self, event: AstrMessageEvent, file_path: str, custom_name: str = "") -> str:
         """备份文件工具。将文件保存到本地备份目录。
@@ -458,6 +522,11 @@ class Main(star.Star):
 
         total_size = sum(f.stat().st_size for f in files)
         lines.append(f"\n📊 共 {len(files)} 个文件，总计 {self._format_size(total_size)}")
+
+        if self._pending_forwards:
+            lines.append(f"\n🚀 待转发文件：{len(self._pending_forwards)} 个")
+            lines.append(f"💡 使用 /查看待转发 查看队列")
+
         lines.append(f"\n💡 使用 /删除备份 [序号] 或 /转发备份 [序号] 操作文件")
 
         return "\n".join(lines)
@@ -506,26 +575,26 @@ class Main(star.Star):
             logger.error(f"[backup_storage] 删除备份文件失败: {e}")
             return f"❌ 删除备份文件失败：{str(e)}"
 
-    async def forward_backup_file(self, event: AstrMessageEvent, index: int) -> str:
+    async def forward_backup_file(self, event: AstrMessageEvent, index: int):
         """转发备份文件。将备份的文件直接发送到群聊。
 
         Args:
             index(int): 要转发的文件序号
-
-        Returns:
-            str: 转发结果
         """
         denied_msg = self._check_user_permission(event)
         if denied_msg:
-            return denied_msg
+            yield event.plain_result(denied_msg)
+            return
 
         files = self._get_backup_files()
 
         if not files:
-            return "📂 备份目录为空，没有可转发的文件哦～"
+            yield event.plain_result("📂 备份目录为空，没有可转发的文件哦～")
+            return
 
         if index < 1 or index > len(files):
-            return f"❌ 无效序号：{index}，有效范围是 1 ~ {len(files)}\n\n请先使用 /查看备份 查看文件列表"
+            yield event.plain_result(f"❌ 无效序号：{index}，有效范围是 1 ~ {len(files)}\n\n请先使用 /查看备份 查看文件列表")
+            return
 
         file_path = files[index - 1]
         file_name = file_path.name
@@ -557,6 +626,44 @@ class Main(star.Star):
             logger.error(f"[backup_storage] 转发备份文件失败: {e}")
             yield event.plain_result(f"❌ 转发备份文件失败：{str(e)}")
             return
+
+    async def show_pending_forwards(self, event: AstrMessageEvent) -> str:
+        """查看待转发的文件列表"""
+        denied_msg = self._check_user_permission(event)
+        if denied_msg:
+            return denied_msg
+
+        if not self._pending_forwards:
+            return "📋 待转发队列为空，没有待转发的文件～"
+
+        lines = ["📋 待转发文件队列：\n"]
+
+        for i, forward_info in enumerate(self._pending_forwards, 1):
+            timestamp = datetime.fromtimestamp(forward_info.get('timestamp', 0))
+            lines.append(f"{i}. {forward_info['file_type'].upper()} {forward_info['file_name']}")
+            lines.append(f"   🕐 加入时间：{timestamp.strftime('%H:%M:%S')}")
+
+        lines.append(f"\n💡 使用 /执行转发 将队列中的文件发送到当前群聊")
+
+        return "\n".join(lines)
+
+    async def execute_pending_forwards(self, event: AstrMessageEvent):
+        """执行待转发的文件队列"""
+        denied_msg = self._check_user_permission(event)
+        if denied_msg:
+            yield event.plain_result(denied_msg)
+            return
+
+        if not self._pending_forwards:
+            yield event.plain_result("📋 待转发队列为空，没有需要转发的文件～")
+            return
+
+        yield event.plain_result(f"🚀 开始转发 {len(self._pending_forwards)} 个文件...")
+
+        async for result in self.check_pending_forwards(event):
+            yield result
+
+        yield event.plain_result("✅ 转发完成！")
 
     async def show_backup_history(self, event: AstrMessageEvent, limit: int = 10) -> str:
         """查看备份历史
@@ -626,9 +733,15 @@ class Main(star.Star):
             lines.append(f"\n📁 监控路径：未配置")
 
         if self.enable_auto_forward:
-            lines.append(f"\n🚀 自动转发：已启用（延迟 {self.auto_forward_delay} 秒）")
+            lines.append(f"\n🚀 自动转发：已启用")
+            lines.append(f"   目标类型：{self.auto_forward_target_type}")
+            lines.append(f"   延迟：{self.auto_forward_delay} 秒")
         else:
             lines.append(f"\n🚀 自动转发：未启用")
+
+        if self._pending_forwards:
+            lines.append(f"\n📋 待转发队列：{len(self._pending_forwards)} 个文件")
+            lines.append(f"💡 使用 /执行转发 将文件发送到当前群聊")
 
         lines.append(f"\n📜 备份历史：{len(self._backup_history)} 条记录")
 
@@ -656,6 +769,18 @@ class Main(star.Star):
     async def cmd_forward_backup_file(self, event: AstrMessageEvent, index: int):
         """转发备份文件命令"""
         async for result in self.forward_backup_file(event, index):
+            yield result
+
+    @astrbot_filter.command("查看待转发")
+    async def cmd_show_pending_forwards(self, event: AstrMessageEvent):
+        """查看待转发文件队列命令"""
+        result = await self.show_pending_forwards(event)
+        yield event.plain_result(result)
+
+    @astrbot_filter.command("执行转发")
+    async def cmd_execute_pending_forwards(self, event: AstrMessageEvent):
+        """执行待转发队列命令"""
+        async for result in self.execute_pending_forwards(event):
             yield result
 
     @astrbot_filter.command("备份历史")

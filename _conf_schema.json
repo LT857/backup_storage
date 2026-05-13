@@ -50,13 +50,13 @@
     "enable_auto_forward": {
         "description": "启用自动转发",
         "type": "bool",
-        "hint": "开启后新备份的文件会自动转发到群聊",
+        "hint": "开启后备份的文件会自动加入待转发队列，用户可使用 /执行转发 将文件发送到当前群聊",
         "default": false
     },
     "auto_forward_delay_seconds": {
         "description": "自动转发延迟（秒）",
         "type": "int",
-        "hint": "备份完成后延迟多少秒再转发，给用户留出取消时间",
+        "hint": "备份完成后延迟多少秒再加入待转发队列",
         "default": 10
     },
     "keep_backup_history": {
