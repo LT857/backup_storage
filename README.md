@@ -1,0 +1,2 @@
+# backup_storage
+支持astrbot指定备份一个文件夹以及转发到群聊删除以及清理等.
