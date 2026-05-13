@@ -1,0 +1,68 @@
+{
+    "backup_dir": {
+        "description": "备份文件存储目录",
+        "type": "string",
+        "hint": "备份文件保存的目录路径，默认为 ./backup-storage",
+        "default": "./backup-storage"
+    },
+    "max_file_size_mb": {
+        "description": "单个文件最大大小（MB）",
+        "type": "int",
+        "hint": "超过此大小的文件将不会被备份",
+        "default": 100
+    },
+    "auto_cleanup_days": {
+        "description": "自动清理天数",
+        "type": "int",
+        "hint": "超过此天数的备份文件将被自动清理。0表示不自动清理",
+        "default": 30
+    },
+    "allowed_users": {
+        "description": "允许使用插件的用户ID列表",
+        "type": "list",
+        "hint": "留空则所有用户都能使用。填写用户ID，多个用逗号分隔",
+        "default": []
+    },
+    "enable_timed_backup": {
+        "description": "启用定时备份",
+        "type": "bool",
+        "hint": "开启后按设定的时间间隔自动备份监控目录中的文件",
+        "default": false
+    },
+    "timed_backup_interval_minutes": {
+        "description": "定时备份间隔（分钟）",
+        "type": "int",
+        "hint": "每隔多少分钟自动执行一次备份。最小值5分钟",
+        "default": 30
+    },
+    "monitor_paths": {
+        "description": "监控路径列表",
+        "type": "list",
+        "hint": "配置要监控的源路径，多个路径用换行分隔。插件会定期扫描这些路径并自动备份新文件",
+        "default": []
+    },
+    "monitor_file_types": {
+        "description": "监控文件类型",
+        "type": "list",
+        "hint": "只备份这些类型的文件，如 mp4,jpg,png,pdf。留空则备份所有文件",
+        "default": []
+    },
+    "enable_auto_forward": {
+        "description": "启用自动转发",
+        "type": "bool",
+        "hint": "开启后新备份的文件会自动转发到群聊",
+        "default": false
+    },
+    "auto_forward_delay_seconds": {
+        "description": "自动转发延迟（秒）",
+        "type": "int",
+        "hint": "备份完成后延迟多少秒再转发，给用户留出取消时间",
+        "default": 10
+    },
+    "keep_backup_history": {
+        "description": "保留备份记录天数",
+        "type": "int",
+        "hint": "备份历史记录保留天数，用于查看备份日志。0表示不保留",
+        "default": 7
+    }
+}
